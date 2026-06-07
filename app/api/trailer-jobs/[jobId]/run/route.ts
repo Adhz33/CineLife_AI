@@ -191,6 +191,37 @@ export async function POST(
     });
 
     const voiceSample = assets.find((asset) => asset.asset_type === "voice_sample");
+
+    if (voiceOption === "Clone My Voice" && !voiceSample) {
+      throw new Error(
+        "Clone My Voice requires an uploaded voice sample. Upload a sample or choose a built-in narrator voice.",
+      );
+    }
+
+    if (
+      voiceOption === "Clone My Voice" &&
+      voiceSample?.metadata?.consentAccepted !== true
+    ) {
+      throw new Error(
+        "Voice cloning consent was not captured for the uploaded voice sample.",
+      );
+    }
+
+    const voiceSampleQuality = voiceSample?.metadata?.quality as
+      | Record<string, unknown>
+      | undefined;
+
+    if (
+      voiceOption === "Clone My Voice" &&
+      voiceSampleQuality &&
+      (voiceSampleQuality.speechDetected !== true ||
+        voiceSampleQuality.verdict === "blocked")
+    ) {
+      throw new Error(
+        "The uploaded voice sample did not pass the clone quality precheck.",
+      );
+    }
+
     const voiceSampleDataUrl =
       voiceOption === "Clone My Voice" && voiceSample
         ? await assetUrlToDataUrl(voiceSample.secure_url)
@@ -205,6 +236,11 @@ export async function POST(
       voiceSampleName: voiceSample?.metadata?.name,
       voiceSampleDuration: voiceSample?.metadata?.duration,
       voiceSampleProfile: voiceSample?.metadata?.profile,
+      voiceSampleQuality: voiceSample?.metadata?.quality,
+      voiceConsentAccepted:
+        voiceOption === "Clone My Voice"
+          ? voiceSample?.metadata?.consentAccepted === true
+          : false,
     });
     const voicePublicId = randomUUID();
     const voiceUpload = await uploadToCloudinary(voice.buffer, {

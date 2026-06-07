@@ -194,16 +194,32 @@ type VoiceSample = {
   url: string;
   duration: number;
   profile?: VoiceSampleProfile;
+  quality: VoiceSampleQuality;
 };
 
 type VoiceSampleProfile = {
   averageRms: number;
   peakRms: number;
   zeroCrossingRate: number;
+  silentRatio: number;
   estimatedPitchHz: number | null;
   voiceFamily: "lower" | "neutral" | "higher";
   energy: "soft" | "balanced" | "strong";
   brightness: "warm" | "balanced" | "bright";
+};
+
+type VoiceQualityStatus = "pass" | "warning" | "fail";
+
+type VoiceSampleQuality = {
+  speechDetected: boolean;
+  durationSeconds: number;
+  durationStatus: VoiceQualityStatus;
+  volumeStatus: VoiceQualityStatus;
+  noiseStatus: VoiceQualityStatus;
+  volumeLabel: string;
+  noiseLabel: string;
+  verdict: "ready" | "needs-improvement" | "blocked";
+  notes: string[];
 };
 
 const initialFormState: FormState = {
@@ -881,10 +897,12 @@ async function requestGeneratedVoice({
   script,
   voiceOption,
   voiceSample,
+  voiceConsentAccepted,
 }: {
   script: string;
   voiceOption: VoiceOption;
   voiceSample: VoiceSample | null;
+  voiceConsentAccepted: boolean;
 }) {
   const voiceSampleDataUrl =
     voiceOption === "Clone My Voice" && voiceSample
@@ -902,6 +920,8 @@ async function requestGeneratedVoice({
       voiceSampleName: voiceSample?.file.name,
       voiceSampleDuration: voiceSample?.duration,
       voiceSampleProfile: voiceSample?.profile,
+      voiceSampleQuality: voiceSample?.quality,
+      voiceConsentAccepted,
     }),
   });
 
@@ -1041,11 +1061,13 @@ async function uploadTrailerJobAssets({
   userId,
   photos,
   voiceSample,
+  voiceConsentAccepted,
 }: {
   jobId: string;
   userId: string;
   photos: UploadedPhoto[];
   voiceSample: VoiceSample | null;
+  voiceConsentAccepted: boolean;
 }) {
   const [photoPayload, voiceSamplePayload] = await Promise.all([
     Promise.all(
@@ -1060,6 +1082,8 @@ async function uploadTrailerJobAssets({
           duration: voiceSample.duration,
           name: voiceSample.file.name,
           profile: voiceSample.profile,
+          quality: voiceSample.quality,
+          consentAccepted: voiceConsentAccepted,
         }))
       : Promise.resolve(null),
   ]);
@@ -1208,12 +1232,16 @@ async function analyzeVoiceSampleProfile(
     let peak = 0;
     let crossings = 0;
     let previous = channel[start] ?? 0;
+    let silentSamples = 0;
     let count = 0;
 
     for (let index = start; index < start + analysisLength; index += step) {
       const sample = channel[index] ?? 0;
       sumSquares += sample * sample;
       peak = Math.max(peak, Math.abs(sample));
+      if (Math.abs(sample) < 0.012) {
+        silentSamples += 1;
+      }
 
       if ((previous >= 0 && sample < 0) || (previous < 0 && sample >= 0)) {
         crossings += 1;
@@ -1225,6 +1253,7 @@ async function analyzeVoiceSampleProfile(
 
     const averageRms = Math.sqrt(sumSquares / Math.max(1, count));
     const zeroCrossingRate = crossings / Math.max(1, count);
+    const silentRatio = silentSamples / Math.max(1, count);
     const estimatedPitchHz = estimatePitchHz(channel, sampleRate, start);
     const voiceFamily =
       estimatedPitchHz === null
@@ -1247,6 +1276,7 @@ async function analyzeVoiceSampleProfile(
       averageRms: Number(averageRms.toFixed(4)),
       peakRms: Number(peak.toFixed(4)),
       zeroCrossingRate: Number(zeroCrossingRate.toFixed(4)),
+      silentRatio: Number(silentRatio.toFixed(4)),
       estimatedPitchHz,
       voiceFamily,
       energy,
@@ -1295,6 +1325,100 @@ function estimatePitchHz(
   return Number((sampleRate / bestLag).toFixed(1));
 }
 
+function getVoiceSampleQuality(
+  duration: number,
+  profile?: VoiceSampleProfile,
+): VoiceSampleQuality {
+  const durationStatus: VoiceQualityStatus =
+    duration >= 15 && duration <= 60 ? "pass" : "fail";
+  const averageVolume = profile?.averageRms ?? 0;
+  const peakVolume = profile?.peakRms ?? 0;
+  const noiseScore = profile?.zeroCrossingRate ?? 0;
+  const silence = profile?.silentRatio ?? 1;
+  const speechDetected = Boolean(
+    profile &&
+      profile.estimatedPitchHz !== null &&
+      averageVolume >= 0.025 &&
+      peakVolume >= 0.08 &&
+      silence < 0.88,
+  );
+  const volumeStatus: VoiceQualityStatus =
+    averageVolume < 0.022 || peakVolume < 0.06 || peakVolume > 0.98
+      ? "fail"
+      : averageVolume < 0.04 || averageVolume > 0.24
+        ? "warning"
+        : "pass";
+  const noiseStatus: VoiceQualityStatus =
+    noiseScore > 0.18 || silence > 0.9
+      ? "fail"
+      : noiseScore > 0.12 || silence > 0.78
+        ? "warning"
+        : "pass";
+  const notes: string[] = [];
+
+  if (!speechDetected) {
+    notes.push("Clear spoken words were not detected in the sample.");
+  }
+
+  if (durationStatus === "fail") {
+    notes.push("Record 15 to 60 seconds of speech for cloning.");
+  }
+
+  if (volumeStatus === "fail") {
+    notes.push("The sample is too quiet, clipped, or uneven for cloning.");
+  } else if (volumeStatus === "warning") {
+    notes.push("Volume is usable, but a steadier recording will improve quality.");
+  }
+
+  if (noiseStatus === "fail") {
+    notes.push("Background noise or silence is too high.");
+  } else if (noiseStatus === "warning") {
+    notes.push("Some noise was detected; a quieter room will improve quality.");
+  }
+
+  const hasFail =
+    durationStatus === "fail" ||
+    volumeStatus === "fail" ||
+    noiseStatus === "fail" ||
+    !speechDetected;
+  const hasWarning =
+    volumeStatus === "warning" || noiseStatus === "warning";
+
+  return {
+    speechDetected,
+    durationSeconds: Number(duration.toFixed(1)),
+    durationStatus,
+    volumeStatus,
+    noiseStatus,
+    volumeLabel:
+      volumeStatus === "pass"
+        ? "Balanced"
+        : volumeStatus === "warning"
+          ? "Usable"
+          : "Poor",
+    noiseLabel:
+      noiseStatus === "pass"
+        ? "Clean"
+        : noiseStatus === "warning"
+          ? "Some noise"
+          : "Noisy",
+    verdict: hasFail ? "blocked" : hasWarning ? "needs-improvement" : "ready",
+    notes: notes.length ? notes : ["Voice sample is ready for cloning."],
+  };
+}
+
+function getQualityStatusClasses(status: VoiceQualityStatus) {
+  if (status === "pass") {
+    return "border-emerald-300/25 bg-emerald-400/10 text-emerald-100";
+  }
+
+  if (status === "warning") {
+    return "border-amber-300/25 bg-amber-400/10 text-amber-100";
+  }
+
+  return "border-red-400/25 bg-red-500/10 text-red-100";
+}
+
 export default function Home() {
   const [form, setForm] = useState<FormState>(initialFormState);
   const [photos, setPhotos] = useState<UploadedPhoto[]>([]);
@@ -1331,6 +1455,7 @@ export default function Home() {
   const [videoRenderError, setVideoRenderError] = useState("");
   const [voiceSample, setVoiceSample] = useState<VoiceSample | null>(null);
   const [voiceSampleError, setVoiceSampleError] = useState("");
+  const [voiceConsentAccepted, setVoiceConsentAccepted] = useState(false);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("idle");
   const [error, setError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1525,9 +1650,36 @@ export default function Home() {
     setVideoRenderError("");
   };
 
+  const clearVoiceSample = () => {
+    if (voiceSampleRef.current) {
+      URL.revokeObjectURL(voiceSampleRef.current.url);
+    }
+
+    setVoiceSample(null);
+    setVoiceSampleError("");
+    setVoiceConsentAccepted(false);
+    clearGeneratedVoice();
+    clearRenderedTrailerVideo();
+  };
+
   const createGeneratedVoice = async (nextMovie: MovieResult) => {
     if (selectedVoiceOption === "Clone My Voice" && !voiceSample) {
       throw new Error("Upload a 15-60 second voice sample before cloning.");
+    }
+
+    if (selectedVoiceOption === "Clone My Voice" && !voiceConsentAccepted) {
+      throw new Error(
+        "Confirm voice cloning consent before generating cloned narration.",
+      );
+    }
+
+    if (
+      selectedVoiceOption === "Clone My Voice" &&
+      voiceSample?.quality.verdict === "blocked"
+    ) {
+      throw new Error(
+        `Voice sample quality check failed: ${voiceSample.quality.notes.join(" ")}`,
+      );
     }
 
     const script = cleanNarrationForVoice(
@@ -1544,6 +1696,7 @@ export default function Home() {
       script,
       voiceOption: selectedVoiceOption,
       voiceSample,
+      voiceConsentAccepted,
     });
     const audioUrl = URL.createObjectURL(audioBlob);
 
@@ -1676,14 +1829,17 @@ export default function Home() {
       }
 
       const profile = await analyzeVoiceSampleProfile(file);
+      const quality = getVoiceSampleQuality(duration, profile);
 
       setVoiceSample({
         file,
         url: sampleUrl,
         duration,
         profile,
+        quality,
       });
       setVoiceSampleError("");
+      setVoiceConsentAccepted(false);
       setSelectedVoiceOption("Clone My Voice");
     } catch (sampleError) {
       URL.revokeObjectURL(sampleUrl);
@@ -1784,6 +1940,27 @@ export default function Home() {
       return;
     }
 
+    if (selectedVoiceOption === "Clone My Voice") {
+      if (!voiceSample) {
+        setError("Upload a 15-60 second voice sample before using Clone My Voice.");
+        return;
+      }
+
+      if (!voiceConsentAccepted) {
+        setError(
+          "Confirm you own or have permission to clone the uploaded voice sample.",
+        );
+        return;
+      }
+
+      if (voiceSample.quality.verdict === "blocked") {
+        setError(
+          `Voice sample quality check failed: ${voiceSample.quality.notes.join(" ")}`,
+        );
+        return;
+      }
+    }
+
     setError("");
     setIsGenerating(true);
     setGenerationProgress(0);
@@ -1848,6 +2025,7 @@ export default function Home() {
         photos,
         voiceSample:
           selectedVoiceOption === "Clone My Voice" ? voiceSample : null,
+        voiceConsentAccepted,
       });
       setGenerationProgress(15);
       setGenerationStatus("Cloudinary assets ready");
@@ -1928,6 +2106,170 @@ export default function Home() {
       }
       setIsGenerating(false);
       setIsGeneratingVoice(false);
+    }
+  };
+
+  const retryProductionStage = async (stage: "voice" | "render") => {
+    if (!productionJob) {
+      setError("No failed trailer job is available to retry.");
+      return;
+    }
+
+    const userId = sessionUserId;
+
+    if (!userId) {
+      setError("Anonymous session is missing. Start generation again.");
+      return;
+    }
+
+    setError("");
+    setIsGenerating(true);
+    setGenerationStage(stage === "voice" ? "Narration" : "Render");
+    setGenerationProgress(stage === "voice" ? 60 : 70);
+    setGenerationStatus(
+      stage === "voice"
+        ? "Retrying voice narration from the existing job"
+        : "Retrying video render from the existing job",
+    );
+    clearRenderedTrailerVideo();
+    window.speechSynthesis?.cancel();
+
+    let pollTimer: number | undefined;
+
+    try {
+      const missingSignals = await Promise.all(
+        photos
+          .filter((photo) => !photoSignals[photo.id])
+          .map(async (photo) => [photo.id, await analyzePhoto(photo)] as const),
+      );
+      const signalsForGeneration = missingSignals.reduce(
+        (currentSignals, [photoId, signal]) => ({
+          ...currentSignals,
+          [photoId]: signal,
+        }),
+        photoSignals,
+      );
+      setPhotoSignals(signalsForGeneration);
+
+      const analysis = await analyzePhotos(photos);
+      const storySequenceForGeneration = createVisualStorySequence(
+        photos,
+        signalsForGeneration,
+        form.futureDream,
+        form.trailerStyle,
+      );
+
+      pollTimer = window.setInterval(() => {
+        void getTrailerJobSnapshot(productionJob.jobId, userId)
+          .then((snapshot) => {
+            setProductionJob(snapshot);
+            setGenerationProgress(snapshot.progress);
+            setGenerationStage(snapshot.stage);
+            setGenerationStatus(snapshot.error || snapshot.stage);
+          })
+          .catch(() => undefined);
+      }, 1200);
+
+      const finalSnapshot = await runTrailerJob({
+        jobId: productionJob.jobId,
+        userId,
+        form,
+        voiceOption: selectedVoiceOption,
+        photoSignals: signalsForGeneration,
+        visualStorySequence: storySequenceForGeneration,
+      });
+
+      if (!finalSnapshot.resultVideoUrl && !finalSnapshot.downloadUrl) {
+        throw new Error("The trailer job completed without a final MP4 URL.");
+      }
+
+      const localMovie = generateMovieResult(form, photos, analysis);
+      const videoUrl =
+        finalSnapshot.resultVideoUrl ?? finalSnapshot.downloadUrl ?? "";
+
+      setMovie({
+        ...localMovie,
+        title:
+          typeof finalSnapshot.metadata?.movieTitle === "string"
+            ? finalSnapshot.metadata.movieTitle
+            : localMovie.title,
+        tagline:
+          typeof finalSnapshot.metadata?.tagline === "string"
+            ? finalSnapshot.metadata.tagline
+            : localMovie.tagline,
+      });
+      setRenderedTrailerVideo({
+        url: videoUrl,
+        fileName: `${productionJob.jobId}-cinelife-trailer.mp4`,
+        shareUrl: finalSnapshot.resultVideoUrl ?? undefined,
+        trailerId: productionJob.jobId,
+      });
+      setProductionJob(finalSnapshot);
+      setGenerationProgress(100);
+      setGenerationStage("Complete");
+      setGenerationStatus("Final MP4 trailer ready");
+      setActiveSlide(0);
+      setPlaybackState("idle");
+    } catch (retryError) {
+      const errorMessage =
+        retryError instanceof Error
+          ? retryError.message
+          : "Trailer retry failed.";
+      setError(
+        `${errorMessage} You can retry the failed stage without re-uploading your photos.`,
+      );
+    } finally {
+      if (pollTimer !== undefined) {
+        window.clearInterval(pollTimer);
+      }
+      setIsGenerating(false);
+      setIsGeneratingVoice(false);
+    }
+  };
+
+  const deleteStoredVoiceSample = async () => {
+    if (!productionJob || !sessionUserId) {
+      clearVoiceSample();
+      return;
+    }
+
+    setVoiceSampleError("");
+
+    try {
+      const response = await fetch(
+        `/api/trailer-jobs/${productionJob.jobId}/assets`,
+        {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            userId: sessionUserId,
+            assetType: "voice_sample",
+          }),
+        },
+      );
+      const data = (await response.json().catch(() => null)) as {
+        error?: string;
+        deletedCount?: number;
+      } | null;
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? "Stored voice sample deletion failed.");
+      }
+
+      clearVoiceSample();
+      setGenerationStatus(
+        data?.deletedCount
+          ? "Stored voice sample deleted"
+          : "Voice sample removed locally",
+      );
+    } catch (deleteError) {
+      setVoiceSampleError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "Unable to delete the stored voice sample.",
+      );
     }
   };
 
@@ -2171,6 +2513,37 @@ export default function Home() {
   const intelligenceReadyCount = photos.filter(
     (photo) => photoSignals[photo.id],
   ).length;
+  const voiceQualityChecks = voiceSample
+    ? [
+        {
+          label: "Speech detected",
+          value: voiceSample.quality.speechDetected ? "Yes" : "No",
+          status: voiceSample.quality.speechDetected
+            ? ("pass" as const)
+            : ("fail" as const),
+        },
+        {
+          label: "Duration",
+          value: `${voiceSample.quality.durationSeconds.toFixed(1)}s`,
+          status: voiceSample.quality.durationStatus,
+        },
+        {
+          label: "Volume",
+          value: voiceSample.quality.volumeLabel,
+          status: voiceSample.quality.volumeStatus,
+        },
+        {
+          label: "Noise level",
+          value: voiceSample.quality.noiseLabel,
+          status: voiceSample.quality.noiseStatus,
+        },
+      ]
+    : [];
+  const canRetryFailedJob = productionJob?.status === "failed";
+  const canRetryVoiceStage =
+    canRetryFailedJob && /narration|voice/i.test(productionJob?.stage ?? "");
+  const canRetryRenderStage =
+    canRetryFailedJob && /render|upload mp4/i.test(productionJob?.stage ?? "");
 
   return (
     <main className="min-h-screen overflow-hidden bg-[#050307] text-white">
@@ -2365,6 +2738,63 @@ export default function Home() {
                           controls
                           src={voiceSample.url}
                         />
+                      ) : null}
+                      {voiceSample ? (
+                        <>
+                          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                            {voiceQualityChecks.map((check) => (
+                              <div
+                                className={`border px-3 py-2 ${getQualityStatusClasses(
+                                  check.status,
+                                )}`}
+                                key={check.label}
+                              >
+                                <p className="text-[0.62rem] font-black uppercase tracking-[0.18em] opacity-75">
+                                  {check.label}
+                                </p>
+                                <p className="mt-1 text-sm font-bold">
+                                  {check.value}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                          <div
+                            className={`mt-3 border px-3 py-2 text-xs leading-5 ${
+                              voiceSample.quality.verdict === "ready"
+                                ? "border-emerald-300/25 bg-emerald-400/10 text-emerald-100"
+                                : voiceSample.quality.verdict ===
+                                    "needs-improvement"
+                                  ? "border-amber-300/25 bg-amber-400/10 text-amber-100"
+                                  : "border-red-400/25 bg-red-500/10 text-red-100"
+                            }`}
+                          >
+                            {voiceSample.quality.notes.join(" ")}
+                          </div>
+                          <label className="mt-4 flex cursor-pointer items-start gap-3 border border-white/10 bg-white/[0.045] p-3 text-sm leading-6 text-zinc-300">
+                            <input
+                              checked={voiceConsentAccepted}
+                              className="mt-1 h-4 w-4 accent-red-500"
+                              onChange={(event) =>
+                                setVoiceConsentAccepted(event.target.checked)
+                              }
+                              type="checkbox"
+                            />
+                            <span>
+                              I confirm this is my voice, or I have explicit
+                              permission to use this voice sample for cloned
+                              narration in this trailer.
+                            </span>
+                          </label>
+                          <button
+                            className="mt-3 inline-flex h-10 w-full items-center justify-center rounded-full border border-red-300/30 bg-red-500/10 px-4 text-sm font-semibold text-red-100 transition hover:border-red-200 hover:bg-red-500/20"
+                            onClick={() => {
+                              void deleteStoredVoiceSample();
+                            }}
+                            type="button"
+                          >
+                            Remove Voice Sample
+                          </button>
+                        </>
                       ) : null}
                     </div>
                   </div>
@@ -2857,6 +3287,92 @@ export default function Home() {
             <p className="mb-6 border border-amber-300/25 bg-amber-400/10 px-4 py-3 text-sm leading-6 text-amber-100">
               {error}
             </p>
+          ) : null}
+
+          {canRetryFailedJob && !isGenerating ? (
+            <div className="mb-8 overflow-hidden border border-red-400/25 bg-red-500/10 shadow-2xl">
+              <div className="grid gap-6 p-5 sm:p-7 lg:grid-cols-[0.34fr_0.66fr]">
+                <div className="relative flex aspect-square max-w-56 items-center justify-center rounded-full border border-white/10 bg-black/45">
+                  <div
+                    className="absolute inset-3 rounded-full"
+                    style={{
+                      background: `conic-gradient(#ef4444 ${
+                        (productionJob?.progress ?? 0) * 3.6
+                      }deg, rgba(255,255,255,0.08) 0deg)`,
+                    }}
+                  />
+                  <div className="absolute inset-7 rounded-full bg-[#09070b]" />
+                  <div className="relative text-center">
+                    <p className="text-5xl font-black leading-none text-white">
+                      {productionJob?.progress ?? generationProgress}%
+                    </p>
+                    <p className="mt-2 text-xs font-bold uppercase tracking-[0.2em] text-red-200">
+                      Failed
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-col justify-center">
+                  <p className="text-sm font-black uppercase tracking-[0.28em] text-red-200">
+                    Job retry available
+                  </p>
+                  <h3 className="mt-3 text-3xl font-black leading-none text-white sm:text-4xl">
+                    {productionJob?.stage ?? "Generation"} stopped before the
+                    final MP4.
+                  </h3>
+                  <p className="mt-4 max-w-2xl text-sm leading-6 text-red-50/80">
+                    {productionJob?.error ||
+                      error ||
+                      "CineLife can retry the failed stage using the same uploaded photos and job assets."}
+                  </p>
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    {canRetryVoiceStage ? (
+                      <button
+                        className="inline-flex h-12 items-center justify-center rounded-full bg-gradient-to-r from-red-600 via-red-500 to-amber-400 px-5 text-sm font-bold text-white shadow-[0_16px_46px_rgba(239,68,68,0.28)] transition hover:scale-[1.01]"
+                        onClick={() => {
+                          void retryProductionStage("voice");
+                        }}
+                        type="button"
+                      >
+                        Retry Voice Stage
+                      </button>
+                    ) : null}
+                    {canRetryRenderStage ? (
+                      <button
+                        className="inline-flex h-12 items-center justify-center rounded-full bg-gradient-to-r from-red-600 via-red-500 to-amber-400 px-5 text-sm font-bold text-white shadow-[0_16px_46px_rgba(239,68,68,0.28)] transition hover:scale-[1.01]"
+                        onClick={() => {
+                          void retryProductionStage("render");
+                        }}
+                        type="button"
+                      >
+                        Retry Render Stage
+                      </button>
+                    ) : null}
+                    {!canRetryVoiceStage && !canRetryRenderStage ? (
+                      <button
+                        className="inline-flex h-12 items-center justify-center rounded-full border border-white/15 bg-white/8 px-5 text-sm font-bold text-zinc-100 transition hover:border-white/35 hover:bg-white/12"
+                        onClick={() => {
+                          void retryProductionStage("render");
+                        }}
+                        type="button"
+                      >
+                        Retry Job
+                      </button>
+                    ) : null}
+                    {selectedVoiceOption === "Clone My Voice" ? (
+                      <button
+                        className="inline-flex h-12 items-center justify-center rounded-full border border-red-300/30 bg-red-500/10 px-5 text-sm font-bold text-red-100 transition hover:border-red-200 hover:bg-red-500/20"
+                        onClick={() => {
+                          void deleteStoredVoiceSample();
+                        }}
+                        type="button"
+                      >
+                        Delete Stored Voice Sample
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
           ) : null}
 
           {isGenerating ? (

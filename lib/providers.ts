@@ -449,6 +449,51 @@ export async function listTrailerAssets(jobId: string, userId: string) {
   return data ?? [];
 }
 
+export async function deleteTrailerAssetsByType(
+  jobId: string,
+  userId: string,
+  assetType: TrailerAssetRecord["assetType"],
+) {
+  const supabase = getSupabaseServiceClient();
+  const { data: assets, error: lookupError } = await supabase
+    .from("trailer_assets")
+    .select("id, public_id, resource_type")
+    .eq("job_id", jobId)
+    .eq("user_id", userId)
+    .eq("asset_type", assetType);
+
+  if (lookupError) {
+    throw new Error(`Supabase asset lookup failed: ${lookupError.message}`);
+  }
+
+  configureCloudinary();
+
+  await Promise.all(
+    (assets ?? []).map((asset) =>
+      cloudinary.uploader.destroy(asset.public_id, {
+        resource_type: asset.resource_type as "image" | "video" | "raw",
+      }),
+    ),
+  );
+
+  if (!assets?.length) {
+    return 0;
+  }
+
+  const { error: deleteError } = await supabase
+    .from("trailer_assets")
+    .delete()
+    .eq("job_id", jobId)
+    .eq("user_id", userId)
+    .eq("asset_type", assetType);
+
+  if (deleteError) {
+    throw new Error(`Supabase asset deletion failed: ${deleteError.message}`);
+  }
+
+  return assets.length;
+}
+
 export async function saveTrailerRecord(record: TrailerRecord) {
   if (!hasSupabaseConfig()) {
     return null;

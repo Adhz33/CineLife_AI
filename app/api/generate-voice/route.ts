@@ -28,16 +28,24 @@ type GenerateVoiceRequest = {
   voiceSampleName?: unknown;
   voiceSampleDuration?: unknown;
   voiceSampleProfile?: unknown;
+  voiceSampleQuality?: unknown;
+  voiceConsentAccepted?: unknown;
 };
 
 type VoiceSampleProfile = {
   averageRms?: number;
   peakRms?: number;
   zeroCrossingRate?: number;
+  silentRatio?: number;
   estimatedPitchHz?: number | null;
   voiceFamily?: "lower" | "neutral" | "higher";
   energy?: "soft" | "balanced" | "strong";
   brightness?: "warm" | "balanced" | "bright";
+};
+
+type VoiceSampleQuality = {
+  speechDetected?: boolean;
+  verdict?: "ready" | "needs-improvement" | "blocked";
 };
 
 type ParsedClonePayload = {
@@ -46,6 +54,7 @@ type ParsedClonePayload = {
   voiceSampleDataUrl: string;
   voiceSampleName: string;
   voiceSampleProfile?: VoiceSampleProfile;
+  voiceSampleQuality?: VoiceSampleQuality;
 };
 
 const voiceProfiles = {
@@ -127,6 +136,28 @@ function parsePayload(payload: GenerateVoiceRequest) {
       return { error: "Voice sample must be between 15 and 60 seconds." };
     }
 
+    if (payload.voiceConsentAccepted !== true) {
+      return {
+        error:
+          "Voice cloning consent is required before generating cloned narration.",
+      };
+    }
+
+    const voiceSampleQuality = parseVoiceSampleQuality(
+      payload.voiceSampleQuality,
+    );
+
+    if (
+      voiceSampleQuality &&
+      (!voiceSampleQuality.speechDetected ||
+        voiceSampleQuality.verdict === "blocked")
+    ) {
+      return {
+        error:
+          "Voice sample quality check failed. Upload a clearer spoken sample before cloning.",
+      };
+    }
+
     return {
       value: {
         script,
@@ -137,6 +168,7 @@ function parsePayload(payload: GenerateVoiceRequest) {
             ? payload.voiceSampleName.slice(0, 160)
             : "voice-sample",
         voiceSampleProfile: parseVoiceSampleProfile(payload.voiceSampleProfile),
+        voiceSampleQuality,
       },
     };
   }
@@ -178,10 +210,30 @@ function parseVoiceSampleProfile(value: unknown): VoiceSampleProfile | undefined
     averageRms: clampNumber(source.averageRms, 0, 1),
     peakRms: clampNumber(source.peakRms, 0, 1),
     zeroCrossingRate: clampNumber(source.zeroCrossingRate, 0, 0.5),
+    silentRatio: clampNumber(source.silentRatio, 0, 1),
     estimatedPitchHz: clampNullableNumber(source.estimatedPitchHz, 60, 400),
     voiceFamily,
     energy,
     brightness,
+  };
+}
+
+function parseVoiceSampleQuality(value: unknown): VoiceSampleQuality | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const source = value as Record<string, unknown>;
+  const verdict =
+    source.verdict === "ready" ||
+    source.verdict === "needs-improvement" ||
+    source.verdict === "blocked"
+      ? source.verdict
+      : undefined;
+
+  return {
+    speechDetected: source.speechDetected === true,
+    verdict,
   };
 }
 
@@ -549,6 +601,8 @@ export async function POST(request: Request) {
             voiceSampleDataUrl: clonePayload.voiceSampleDataUrl,
             voiceSampleName: clonePayload.voiceSampleName,
             voiceSampleProfile: clonePayload.voiceSampleProfile,
+            voiceSampleQuality: clonePayload.voiceSampleQuality,
+            voiceConsentAccepted: true,
           }),
         });
 

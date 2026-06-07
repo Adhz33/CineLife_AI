@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import {
+  deleteTrailerAssetsByType,
   getCineLifeConfigDiagnostics,
   saveTrailerAsset,
   updateTrailerJob,
@@ -13,6 +14,11 @@ type UploadAssetsRequest = {
   userId?: unknown;
   photos?: unknown;
   voiceSample?: unknown;
+};
+
+type DeleteAssetsRequest = {
+  userId?: unknown;
+  assetType?: unknown;
 };
 
 type BrowserAsset = {
@@ -119,6 +125,7 @@ function normalizeVoiceSampleProfile(value: unknown) {
     averageRms: normalizeNumber(source.averageRms, 0, 1),
     peakRms: normalizeNumber(source.peakRms, 0, 1),
     zeroCrossingRate: normalizeNumber(source.zeroCrossingRate, 0, 0.5),
+    silentRatio: normalizeNumber(source.silentRatio, 0, 1),
     estimatedPitchHz:
       source.estimatedPitchHz === null
         ? null
@@ -126,6 +133,37 @@ function normalizeVoiceSampleProfile(value: unknown) {
     voiceFamily,
     energy,
     brightness,
+  };
+}
+
+function normalizeVoiceSampleQuality(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const source = value as Record<string, unknown>;
+  const verdict =
+    source.verdict === "ready" ||
+    source.verdict === "needs-improvement" ||
+    source.verdict === "blocked"
+      ? source.verdict
+      : "blocked";
+
+  return {
+    speechDetected: source.speechDetected === true,
+    durationSeconds: normalizeNumber(source.durationSeconds, 0, 120),
+    durationStatus: sanitizeText(source.durationStatus, "fail", 16),
+    volumeStatus: sanitizeText(source.volumeStatus, "fail", 16),
+    noiseStatus: sanitizeText(source.noiseStatus, "fail", 16),
+    volumeLabel: sanitizeText(source.volumeLabel, "Unknown", 40),
+    noiseLabel: sanitizeText(source.noiseLabel, "Unknown", 40),
+    verdict,
+    notes: Array.isArray(source.notes)
+      ? source.notes
+          .map((note) => sanitizeText(note, "", 220))
+          .filter(Boolean)
+          .slice(0, 8)
+      : [],
   };
 }
 
@@ -237,6 +275,10 @@ export async function POST(
         mimeType: decoded.mimeType,
         duration: source.duration,
         profile: normalizeVoiceSampleProfile(source.profile),
+        quality: normalizeVoiceSampleQuality(source.quality),
+        consentAccepted: source.consentAccepted === true,
+        consentCapturedAt:
+          source.consentAccepted === true ? new Date().toISOString() : null,
       },
     });
 
@@ -259,5 +301,57 @@ export async function POST(
   return jsonResponse({
     photos: uploadedPhotos,
     voiceSample: uploadedVoiceSample,
+  });
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ jobId: string }> },
+) {
+  const config = await getCineLifeConfigDiagnostics();
+
+  if (!config.checks.cloudinary || !config.checks.supabaseServer) {
+    return jsonResponse(
+      {
+        error:
+          "Cloudinary and Supabase server access are required to delete stored assets.",
+        diagnostics: config.diagnostics,
+        missing: config.missing,
+      },
+      503,
+    );
+  }
+
+  const { jobId } = await context.params;
+  let body: DeleteAssetsRequest;
+
+  try {
+    body = (await request.json()) as DeleteAssetsRequest;
+  } catch {
+    return jsonResponse({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const userId = sanitizeText(body.userId, "", 80);
+  const assetType = sanitizeText(body.assetType, "", 80);
+
+  if (!userId) {
+    return jsonResponse({ error: "A Supabase anonymous userId is required." }, 400);
+  }
+
+  if (assetType !== "voice_sample") {
+    return jsonResponse(
+      { error: "Only stored voice samples can be deleted from this endpoint." },
+      400,
+    );
+  }
+
+  const deletedCount = await deleteTrailerAssetsByType(
+    jobId,
+    userId,
+    "voice_sample",
+  );
+
+  return jsonResponse({
+    deletedCount,
   });
 }

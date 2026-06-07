@@ -22,7 +22,8 @@ flowchart LR
   C --> D{"Clone voice?"}
   D -- "No" --> E["OpenAI TTS narration"]
   D -- "Yes" --> F["Upload 15-60s voice sample"]
-  F --> G["OpenAI transcribes reference sample"]
+  F --> Q["Consent + quality precheck"]
+  Q --> G["OpenAI transcribes reference sample"]
   G --> H["F5-TTS clones narration in chunks"]
   E --> I["Remotion renders trailer timeline"]
   H --> I
@@ -68,6 +69,9 @@ flowchart TB
 - OpenAI photo-aware story and narration generation
 - OpenAI TTS voice options
 - Local F5-TTS voice cloning from uploaded reference audio
+- Voice-cloning consent gate with speech, duration, volume, and noise precheck
+- Local and stored voice-sample deletion controls
+- Failed job retry controls for voice/render stages using the same job assets
 - Remotion MP4 rendering at 1920x1080
 - Cloudinary MP4 upload and delivery
 - Numeric progress model from job creation to completion
@@ -184,6 +188,7 @@ Voice sample requirements:
 - minimal background noise
 - no music over the voice
 - enough spoken words for transcription
+- explicit consent in the app before cloned narration is generated
 
 If F5-TTS is not enabled, CineLife can still use OpenAI TTS voice options. `Clone My Voice` requires a valid F5-TTS setup or a secured external clone service.
 
@@ -203,7 +208,9 @@ When present, CineLife sends:
   "script": "clean narration text",
   "voiceSampleDataUrl": "data:audio/...",
   "voiceSampleName": "sample.wav",
-  "voiceSampleProfile": {}
+  "voiceSampleProfile": {},
+  "voiceSampleQuality": {},
+  "voiceConsentAccepted": true
 }
 ```
 
@@ -239,6 +246,7 @@ Routes:
 - `GET /api/cinelife-config`
 - `POST /api/trailer-jobs`
 - `POST /api/trailer-jobs/[jobId]/assets`
+- `DELETE /api/trailer-jobs/[jobId]/assets`
 - `POST /api/trailer-jobs/[jobId]/run`
 - `GET /api/trailer-jobs/[jobId]`
 - `POST /api/generate-trailer`
@@ -286,6 +294,14 @@ brew install ffmpeg
 
 Use a cleaner sample with clear spoken words, no music, and 15-60 seconds of steady speech.
 
+### Voice sample fails precheck
+
+CineLife checks for detectable speech, valid duration, usable volume, and noise/silence level before cloning. Re-record in a quiet room, speak continuously, and avoid music or fan noise.
+
+### Voice or render job fails
+
+Use the retry controls in the failed job panel. The app reuses the same Supabase job and Cloudinary assets instead of making you upload photos again.
+
 ### Final video cuts off narration
 
 The render route measures generated audio with `ffprobe` and extends the Remotion duration up to the product cap of 60 seconds. If your narration is longer than 60 seconds, shorten the generated script or increase the product cap deliberately.
@@ -296,13 +312,13 @@ The render route measures generated audio with `ffprobe` and extends the Remotio
 - Keep `.env.local` untracked.
 - Keep `SUPABASE_SERVICE_ROLE_KEY`, Cloudinary secret, and OpenAI key server-only.
 - Store voice samples only for the job.
-- Add explicit user consent before production voice cloning.
+- Require explicit user consent before production voice cloning.
+- Delete stored voice samples through the job assets API when users request removal.
 
 ## Recommended Next Steps
 
 - Move F5 and Remotion work to a durable background worker.
-- Add voice sample quality scoring before generation.
-- Add job retry controls for story, voice, render, and upload stages.
 - Add authenticated user accounts for saved trailer history.
-- Add a delete button for uploaded voice samples and generated trailers.
+- Add generated trailer deletion controls and retention policies.
+- Extend retry controls to story/upload stages.
 - Add music selection and waveform-based ducking controls.

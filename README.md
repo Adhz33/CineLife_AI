@@ -13,6 +13,55 @@ The app generates a real downloadable MP4 using:
 - Cloudinary for media storage and final trailer delivery
 - Supabase for anonymous job ownership, job state, assets, and events
 
+## Overview
+
+CineLife AI is a production-style AI movie trailer generator that turns 3-10 personal photos, a future dream, and optional voice reference audio into a cinematic life trailer. The final user-facing output is a playable and downloadable MP4, not a mock preview or storyboard.
+
+## Problem Statement
+
+People have meaningful memories in their photo libraries, but turning those memories into an emotional, polished video requires storytelling, editing, narration, audio processing, storage, and rendering skills. CineLife AI solves the gap between raw personal photos and a finished cinematic trailer that feels personal and shareable.
+
+## Solution
+
+CineLife AI analyzes uploaded photos, generates a personalized trailer story with OpenAI, creates narration with OpenAI TTS or local F5-TTS voice cloning, renders a Remotion timeline with cinematic motion and title cards, uploads media through Cloudinary, and tracks job state through Supabase anonymous ownership. Users see real percentage progress and receive a final MP4 they can watch, download, or share.
+
+## Tech Stack
+
+- Frontend: Next.js, TypeScript, Tailwind CSS, Framer Motion
+- Backend: Next.js App Router API routes, Node.js runtime
+- Database: Supabase Postgres with anonymous job ownership and RLS-ready tables
+- APIs: OpenAI Responses API, OpenAI Vision, OpenAI transcription, OpenAI TTS, Cloudinary Upload API
+- Video: Remotion, FFmpeg, FFprobe, local F5-TTS for optional voice cloning
+- Hosting: Vercel-ready Next.js app with Cloudinary media delivery and Supabase backend services
+
+## Codex / OpenAI Usage
+
+- Ideation: shaped the product into a Netflix-style "life trailer" generator with a clear user flow.
+- Architecture planning: designed the job-based pipeline across OpenAI, Cloudinary, Supabase, Remotion, FFmpeg, and F5-TTS.
+- Code generation: implemented the Next.js UI, API routes, structured OpenAI generation, media upload, voice generation, and render pipeline.
+- Debugging: fixed malformed JSON parsing, narration timestamp cleanup, F5-TTS chunking, audio duration sync, and failed-job retry behavior.
+- Testing: ran lint/build checks, browser checks, and local API smoke tests for consent and generation safeguards.
+- Documentation: created this README, setup instructions, architecture diagrams, API route documentation, and troubleshooting notes.
+- API integration: connected OpenAI Responses, OpenAI TTS/transcription, Cloudinary uploads, Supabase jobs/assets/events, Remotion rendering, and FFmpeg processing.
+
+## Screenshots
+
+![CineLife AI hero](docs/screenshots/cinelife-home.png)
+
+![CineLife AI builder](docs/screenshots/cinelife-builder.png)
+
+## How to Run Locally
+
+```bash
+git clone git@github.com:Adhz33/CineLife_AI.git
+cd CineLife_AI
+npm install
+cp .env.local.example .env.local
+npm run dev
+```
+
+Then open [http://localhost:3000](http://localhost:3000).
+
 ## Product Flow
 
 ```mermaid
